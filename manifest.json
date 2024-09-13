@@ -7,15 +7,19 @@
       "scripting",
       "tabs",
       "storage",
-      "sidePanel"
+      "sidePanel",
+      "downloads"
     ],
     "background": {
-      "service_worker": "background.js"
+      "service_worker": "background.js",
+      "type": "module"
     },
     "content_scripts": [
       {
-        "matches": ["https://secure.mypennmedicine.org/MyPennMedicine/app/test-results"],
-        "js": ["content.js"]
+        "matches": ["https://chatgpt.com/*"],
+        "js": [
+            "content.js"
+        ]
       }
     ],
     "side_panel": {
@@ -23,7 +27,9 @@
     },
     "host_permissions": [
       "https://secure.mypennmedicine.org/*",
-      "https://chatgpt.com/*"
+      "https://chatgpt.com/*",
+      "https://chat.openai.com/*",
+      "file:///*"
     ],
     "action": {
       "default_popup": "sidepanel.html"
