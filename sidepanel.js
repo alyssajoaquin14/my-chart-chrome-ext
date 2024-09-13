@@ -1,93 +1,227 @@
-// Add event listener to the button in the side panel
-document.getElementById('chatButton').addEventListener('click', () => {
-  // Show the loading message in the side panel
+document.addEventListener('DOMContentLoaded', () => {
+  // Add event listener to the button in the side panel
+  const chatButton = document.getElementById('chatButton');
+  if (chatButton) {
+    chatButton.addEventListener('click', startDownloadProcess);
+  }
+
+  // Add listener for messages from the background script
+  chrome.runtime.onMessage.addListener(handleMessage);
+
+  // Notify background script that side panel is ready
+  notifyBackgroundScriptReady();
+});
+
+
+function startDownloadProcess() {
   document.getElementById('loadingMessage').style.display = 'block';
-
-  // Get the current active tab where the side panel is interacting
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const activeTab = tabs[0];
-      const desiredUrl = 'https://secure.mypennmedicine.org/MyPennMedicine/app/test-results';
-
-      // Check if the current URL is the desired test results page
-      if (activeTab.url !== desiredUrl) {
-          // Navigate to the test results page
-          chrome.tabs.update(activeTab.id, { url: desiredUrl });
-
-          // Listen for the tab update to complete
-          chrome.tabs.onUpdated.addListener(function listener(tabId, changeInfo) {
-              // Ensure that the update is for the correct tab and the status is complete
-              if (tabId === activeTab.id && changeInfo.status === 'complete') {
-                  // Remove the listener to avoid multiple triggers
-                  chrome.tabs.onUpdated.removeListener(listener);
-
-                  // Execute the function to find and click the most recent test result
-                  executeFindAndClickTestResult(activeTab.id);
-              }
-          });
-      } else {
-          // If already on the correct page, directly execute the script
-          executeFindAndClickTestResult(activeTab.id);
+  
+  chrome.runtime.sendMessage({ action: 'startDownloadProcess' }, response => {
+    if (chrome.runtime.lastError) {
+      console.error('Error sending message:', chrome.runtime.lastError);
+    } else if (response) {
+      if (response.type === 'success') {
+        console.log('Message sent to background script to start download process.');
+      } else if (response.type === 'test') {
+        console.log('Test message received inside response:', response.data);
       }
-  });
-});
-
-// Function to execute the script to find and click the most recent test result
-function executeFindAndClickTestResult(tabId) {
-  chrome.scripting.executeScript({
-      target: { tabId: tabId }, // Target the active tab
-      func: findAndClickMostRecentTestResult, // Function to execute
+    } else {
+      console.log('No response received from background script.');
+    }
   });
 }
 
-// Function to be executed in the main page context to click the most recent test result
-function findAndClickMostRecentTestResult() {
-  // Polling function to check if the desired content is available
-  function waitForContent(selector, maxRetries = 10, interval = 1000) {
-      return new Promise((resolve, reject) => {
-          let attempts = 0;
-          const check = () => {
-              attempts++;
-              const element = document.querySelector(selector);
-              if (element) {
-                  resolve(element);
-              } else if (attempts >= maxRetries) {
-                  reject('No test results found after waiting.');
-              } else {
-                  setTimeout(check, interval);
+function handleMessage(message, sender, sendResponse) {
+  console.log('Message received in sidepanel:', message);
+
+  if (message.action === 'updateLoadingMessage') {
+    const loadingMessage = document.getElementById('loadingMessage');
+    if (loadingMessage) {
+        loadingMessage.textContent = message.message; // Update the loading message
+    }
+  } else if (message.action === 'pdfBlobStored') {
+    // Retrieve the stored PDF blob data from chrome.storage.local
+    chrome.storage.local.get('pdfBlobData', (result) => {
+      const base64Data = result.pdfBlobData;
+      console.log('Retrieved PDF data from storage:', base64Data);
+
+      if (!base64Data) {
+        console.error('No PDF data found in storage.');
+        sendResponse({ status: 'Error: No PDF data found' });
+        return;
+      }
+
+      // Convert base64 string back to a Blob and display it
+      displayPdfFromBase64(base64Data);
+
+      // Clear the data from storage after use to avoid buildup
+      chrome.storage.local.remove('pdfBlobData', () => {
+        if (chrome.runtime.lastError) {
+          console.error('Error clearing PDF data from storage:', chrome.runtime.lastError);
+        } else {
+          console.log('PDF data cleared from storage.');
+        }
+      });
+
+      sendResponse({ status: 'PDF displayed successfully' });
+    });
+    return true; // Indicate async response
+  } else if (message.action === 'removeLoadingMessage') {
+    // Handle remove loading message action
+    const loadingMessage = document.getElementById('loadingMessage');
+    if (loadingMessage) {
+      loadingMessage.style.display = 'none';
+    }
+    console.log('Handling remove loading message action.');
+    sendResponse({ status: 'Loading message removed' });
+  } else if (message.action ==='allXmlDataStored') {
+      chrome.storage.local.get('allXmlData', (result) => {
+        const xmlData = result.allXmlData;
+        console.log('Retrieved all XML data from storage:', xmlData);
+        
+        if (!xmlData || Object.keys(xmlData).length === 0) {
+            console.error('No XML data found in storage.');
+            sendResponse({ status: 'Error: No XML data found' });
+            return;
+        }
+
+        let allExtractedResults = '';
+
+        // Process each XML file's data
+        for (const [fileName, base64Data] of Object.entries(xmlData)) {
+            // Decode and parse XML, then extract results
+            const extractedResults = processXmlFile(base64Data, fileName);
+            allExtractedResults += `Results from ${fileName}:\n${extractedResults}\n\n`;
+        }
+
+        // Clear the data from storage after use to avoid buildup
+        chrome.storage.local.remove('allXmlData', () => {
+            if (chrome.runtime.lastError) {
+                console.error('Error clearing XML data from storage:', chrome.runtime.lastError);
+            } else {
+                console.log('All XML data cleared from storage.');
+            }
+        });
+
+        chrome.runtime.sendMessage({ action: 'openChatGPT', data: allExtractedResults }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error('Error sending message to background script:', chrome.runtime.lastError);
+            } else {
+                console.log('Sent message to background script to open ChatGPT:', response);
+            }
+        });
+
+      sendResponse({ status: 'All results processed and sent to background script' });
+    });
+    return true; // Indicate async response
+  }
+
+  sendResponse({ status: 'Message handled in sidepanel' });
+  return true; // Indicate async response
+}
+
+function displayPdfFromBase64(base64Data) {
+  // Convert base64 string to a Blob
+  const byteCharacters = atob(base64Data);
+  const byteArray = new Uint8Array([...byteCharacters].map(char => char.charCodeAt(0)));
+  const blob = new Blob([byteArray], { type: 'application/pdf' });
+  const blobUrl = URL.createObjectURL(blob);
+
+  // Display the PDF using the Blob URL in an iframe
+  const iframe = document.createElement('iframe');
+  iframe.src = blobUrl;
+  iframe.width = '100%';
+  iframe.height = '800px';  // Adjust height as needed for long PDFs
+  document.body.appendChild(iframe);
+
+  // Revoke the Blob URL when done to free up memory
+  iframe.onload = () => URL.revokeObjectURL(blobUrl);
+}
+
+function notifyBackgroundScriptReady() {
+  chrome.runtime.sendMessage({ action: 'sidePanelReady' }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error('Error notifying background script:', chrome.runtime.lastError);
+    } else {
+      console.log('Notified background script that side panel is ready:', response);
+    }
+  });
+}
+
+function processXmlFile(base64Data, fileName) {
+  // Decode base64 string to text
+  const decodedData = atob(base64Data);
+
+  // Parse the XML string into an XML document
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(decodedData, 'text/xml');
+
+  // Extract results from the XML document
+  const extractedResults = extractAllResultsFromXML(xmlDoc);
+
+  return extractedResults;
+}
+
+function extractAllResultsFromXML(xmlDoc, maxCaptions = 10, maxChars = 5000) {
+  // Locate the "Results" section
+  const resultsSections = xmlDoc.getElementsByTagName('section');
+  let extractedData = '';
+  let captionCount = 0;
+  let charCount = 0;
+
+  for (let section of resultsSections) {
+    const title = section.getElementsByTagName('title')[0]?.textContent || '';
+    if (title === 'Results') {
+      // Extract the relevant test data within the "Results" section
+      const textElement = section.getElementsByTagName('text')[0];
+      if (textElement) {
+        // Extract lists, tables, and other relevant components
+        const lists = textElement.getElementsByTagName('list');
+        for (let list of lists) {
+          const items = list.getElementsByTagName('item');
+          for (let item of items) {
+            // Extract captions and tables within each item
+            const caption = item.getElementsByTagName('caption')[0]?.textContent || 'No Caption';
+            
+            // Check limits before adding the caption
+            if (captionCount >= maxCaptions || charCount + caption.length > maxChars) {
+              console.log('Reached limit: stopping extraction');
+              return extractedData; // Stop extraction if limits are reached
+            }
+
+            extractedData += `Caption: ${caption}\n`;
+            captionCount++;
+            charCount += caption.length;
+
+            const tables = item.getElementsByTagName('table');
+            for (let table of tables) {
+              const rows = table.getElementsByTagName('tr');
+              for (let row of rows) {
+                const cells = row.getElementsByTagName('td');
+                const rowData = Array.from(cells).map(cell => cell.textContent.trim()).join(' | ');
+                
+                // Check limits before adding table data
+                if (charCount + rowData.length > maxChars) {
+                  console.log('Reached limit: stopping extraction');
+                  return extractedData; // Stop extraction if character limit is reached
+                }
+
+                extractedData += `  ${rowData}\n`;
+                charCount += rowData.length;
               }
-          };
-          check();
-      });
+            }
+            extractedData += '\n'; // Add spacing between items
+          }
+        }
+      }
+    }
   }
-
-  // Use the polling function to wait for the first test result link to appear
-  waitForContent('ul._List.listContainer ._ListElement a.ResultDetailsLink')
-      .then((firstResultLink) => {
-          // Click the link to navigate to the test result details page
-          firstResultLink.click();
-
-          // After clicking, wait a bit for the navigation to complete and capture the content
-          setTimeout(() => {
-              // Extract the relevant text content from the new page
-              const resultContainer = document.querySelector('div._LayoutGrid.grid._layout.fullWidthPrint.mainSectionGrid');
-              let resultText = resultContainer ? resultContainer.innerText : '';
-
-              // Append a prompt for ChatGPT
-              resultText += "\nPlease help me understand the above test results. Act as a medical professional chatbot.";
-
-              // Send the extracted text back to the background script to open ChatGPT
-              chrome.runtime.sendMessage({ action: 'openChatGPT', data: resultText });
-          }, 3000); // Adjust delay based on page load time
-      })
-      .catch((error) => {
-          // Display the error message in the side panel
-          document.getElementById('loadingMessage').textContent = error;
-      });
+  // Add prompt instructions at the end
+  return addPromptInstructions(extractedData);
 }
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.action === 'removeLoadingMessage') {
-      // Hide the loading message once the process is complete
-      document.getElementById('loadingMessage').style.display = 'none';
-  }
-});
+// Function to add prompt instructions to the extracted data
+function addPromptInstructions(extractedData) {
+  const promptInstructions = "\n\nPlease act as a medical chatbot to help me understand my test results.";
+  return extractedData + promptInstructions;
+}
